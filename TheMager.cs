@@ -450,11 +450,21 @@ namespace TheMager
             catch { }
 
             this.FormBorderStyle = FormBorderStyle.None;
-            this.WindowState = FormWindowState.Maximized;
             this.TopMost = true;
             this.BackColor = System.Drawing.Color.Black;
             this.ShowInTaskbar = false;
             this.Cursor = Cursors.Arrow;
+
+            // Span ALL monitors (virtual screen bounds)
+            System.Drawing.Rectangle virtualScreen = System.Drawing.Rectangle.Empty;
+            foreach (Screen s in Screen.AllScreens)
+                virtualScreen = System.Drawing.Rectangle.Union(virtualScreen, s.Bounds);
+            this.StartPosition = FormStartPosition.Manual;
+            this.Bounds = virtualScreen;
+
+            // Center UI on primary screen
+            int cx = Screen.PrimaryScreen.Bounds.X + (Screen.PrimaryScreen.Bounds.Width / 2);
+            int cy = Screen.PrimaryScreen.Bounds.Y + 150;
 
             var title = new Label
             {
@@ -463,7 +473,7 @@ namespace TheMager
                 Font = new System.Drawing.Font("Consolas", 36, System.Drawing.FontStyle.Bold),
                 AutoSize = true
             };
-            title.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - title.PreferredWidth) / 2, 150);
+            title.Location = new System.Drawing.Point(cx - (title.PreferredWidth / 2), cy);
             this.Controls.Add(title);
 
             var msg = new Label
@@ -473,7 +483,7 @@ namespace TheMager
                 Font = new System.Drawing.Font("Segoe UI", 16),
                 AutoSize = true
             };
-            msg.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - msg.PreferredWidth) / 2, 230);
+            msg.Location = new System.Drawing.Point(cx - (msg.PreferredWidth / 2), cy + 80);
             this.Controls.Add(msg);
 
             var pwBox = new TextBox
@@ -485,7 +495,7 @@ namespace TheMager
                 ForeColor = System.Drawing.Color.White,
                 TextAlign = HorizontalAlignment.Center
             };
-            pwBox.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 300) / 2, 320);
+            pwBox.Location = new System.Drawing.Point(cx - 150, cy + 170);
             this.Controls.Add(pwBox);
 
             var unlockBtn = new Button
@@ -496,7 +506,7 @@ namespace TheMager
                 Font = new System.Drawing.Font("Consolas", 14, System.Drawing.FontStyle.Bold),
                 Size = new System.Drawing.Size(300, 40)
             };
-            unlockBtn.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 300) / 2, 365);
+            unlockBtn.Location = new System.Drawing.Point(cx - 150, cy + 215);
             this.Controls.Add(unlockBtn);
 
             var failLabel = new Label
@@ -505,7 +515,7 @@ namespace TheMager
                 Font = new System.Drawing.Font("Segoe UI", 11),
                 AutoSize = true
             };
-            failLabel.Location = new System.Drawing.Point((Screen.PrimaryScreen.WorkingArea.Width - 200) / 2, 420);
+            failLabel.Location = new System.Drawing.Point(cx - 100, cy + 270);
             this.Controls.Add(failLabel);
 
             EventHandler tryUnlock = delegate
