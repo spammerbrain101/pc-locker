@@ -316,18 +316,70 @@ namespace TheMager
             }
             catch { }
 
-            // Disable Task Manager machine-wide
+            // === COMPREHENSIVE LOCKDOWN ===
+            // Disable ALL Ctrl+Alt+Del options: Task Manager, Lock, Change Password, Switch User
+            try
+            {
+                RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+                key.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord);       // No Task Manager
+                key.SetValue("DisableLockWorkstation", 1, RegistryValueKind.DWord); // No Lock option
+                key.SetValue("DisableChangePassword", 1, RegistryValueKind.DWord); // No Change Password
+                key.SetValue("HideFastUserSwitching", 1, RegistryValueKind.DWord); // No Switch User
+                key.Close();
+            }
+            catch { }
+            // Also try HKLM (needs admin but worth trying)
             try
             {
                 RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
                 key.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord);
+                key.SetValue("DisableLockWorkstation", 1, RegistryValueKind.DWord);
+                key.SetValue("DisableChangePassword", 1, RegistryValueKind.DWord);
+                key.SetValue("HideFastUserSwitching", 1, RegistryValueKind.DWord);
+                key.Close();
+            }
+            catch { }
+
+            // Disable Fast User Switching entirely
+            try
+            {
+                RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
+                key.SetValue("HideFastUserSwitching", 1, RegistryValueKind.DWord);
+                key.Close();
+            }
+            catch { }
+
+            // Remove ALL power options: shutdown, restart, sleep, hibernate
+            try
+            {
+                RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer");
+                key.SetValue("NoClose", 1, RegistryValueKind.DWord);      // No shutdown/restart
+                key.SetValue("NoPowerOptions", 1, RegistryValueKind.DWord); // No power options menu
                 key.Close();
             }
             catch { }
             try
             {
+                RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer");
+                key.SetValue("NoClose", 1, RegistryValueKind.DWord);
+                key.SetValue("NoPowerOptions", 1, RegistryValueKind.DWord);
+                key.Close();
+            }
+            catch { }
+
+            // Disable sleep/hibernate via powercfg
+            try { Process.Start(new ProcessStartInfo("powercfg", "/hibernate off") { CreateNoWindow = true, UseShellExecute = false }); } catch { }
+            try { Process.Start(new ProcessStartInfo("powercfg", "/change standby-timeout-ac 0") { CreateNoWindow = true, UseShellExecute = false }); } catch { }
+            try { Process.Start(new ProcessStartInfo("powercfg", "/change standby-timeout-dc 0") { CreateNoWindow = true, UseShellExecute = false }); } catch { }
+            try { Process.Start(new ProcessStartInfo("powercfg", "/change hibernate-timeout-ac 0") { CreateNoWindow = true, UseShellExecute = false }); } catch { }
+            try { Process.Start(new ProcessStartInfo("powercfg", "/change hibernate-timeout-dc 0") { CreateNoWindow = true, UseShellExecute = false }); } catch { }
+
+            // Disable shutdown command via registry
+            try
+            {
                 RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System");
-                key.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord);
+                key.SetValue("DisableShutDown", 1, RegistryValueKind.DWord);
+                key.SetValue("DisableRestart", 1, RegistryValueKind.DWord);
                 key.Close();
             }
             catch { }
@@ -410,9 +462,12 @@ namespace TheMager
 
         void Unlock()
         {
-            // Re-enable Task Manager (it will be disabled again on next run via startup)
-            try { RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"); key.DeleteValue("DisableTaskMgr", false); key.Close(); } catch { }
-            try { RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"); key.DeleteValue("DisableTaskMgr", false); key.Close(); } catch { }
+            // Restore ALL Ctrl+Alt+Del options
+            try { RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"); key.DeleteValue("DisableTaskMgr", false); key.DeleteValue("DisableLockWorkstation", false); key.DeleteValue("DisableChangePassword", false); key.DeleteValue("HideFastUserSwitching", false); key.DeleteValue("DisableShutDown", false); key.DeleteValue("DisableRestart", false); key.Close(); } catch { }
+            try { RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"); key.DeleteValue("DisableTaskMgr", false); key.DeleteValue("DisableLockWorkstation", false); key.DeleteValue("DisableChangePassword", false); key.DeleteValue("HideFastUserSwitching", false); key.Close(); } catch { }
+            // Restore power options
+            try { RegistryKey key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"); key.DeleteValue("NoClose", false); key.DeleteValue("NoPowerOptions", false); key.Close(); } catch { }
+            try { RegistryKey key = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"); key.DeleteValue("NoClose", false); key.DeleteValue("NoPowerOptions", false); key.Close(); } catch { }
 
             if (hookId != IntPtr.Zero) UnhookWindowsHookEx(hookId);
             focusTimer.Stop();
@@ -427,8 +482,16 @@ namespace TheMager
             if (nCode >= 0)
             {
                 int vkCode = Marshal.ReadInt32(lParam);
-                // Block: Win (91/92), Alt+Tab (9), Alt+F4 (115->F4), Ctrl+Esc (27)
+                // Block Windows keys (LWin=91, RWin=92)
                 if (vkCode == 91 || vkCode == 92) return (IntPtr)1;
+                // Block Alt+Tab (Tab=9) — check if Alt is modifier
+                if (vkCode == 9 && (Control.ModifierKeys & Keys.Alt) != 0) return (IntPtr)1;
+                // Block Alt+F4 (F4=115)
+                if (vkCode == 115 && (Control.ModifierKeys & Keys.Alt) != 0) return (IntPtr)1;
+                // Block Ctrl+Esc (Esc=27) — opens Start menu
+                if (vkCode == 27 && (Control.ModifierKeys & Keys.Control) != 0) return (IntPtr)1;
+                // Block Ctrl+Shift+Esc (Esc=27) — opens Task Manager directly
+                if (vkCode == 27 && (Control.ModifierKeys & Keys.Control) != 0 && (Control.ModifierKeys & Keys.Shift) != 0) return (IntPtr)1;
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);
         }
