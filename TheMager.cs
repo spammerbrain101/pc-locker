@@ -43,6 +43,7 @@ namespace TheMager
 
             if (doDeploy && deployPw != null)
             {
+                Directory.CreateDirectory(InstallDir);
                 File.WriteAllText(PasswordFile, Sha256(deployPw));
                 if (deployMsg != null)
                 {
